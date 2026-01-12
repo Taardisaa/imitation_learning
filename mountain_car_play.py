@@ -4,6 +4,7 @@ if not hasattr(np, "bool8"):
 import gym
 import pygame
 from teleop import play
+
 mapping = {(pygame.K_LEFT,): 0,
            (pygame.K_RIGHT,): 2,
            (): 1  # Coast (no keys pressed)
