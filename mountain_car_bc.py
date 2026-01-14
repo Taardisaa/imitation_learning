@@ -106,7 +106,6 @@ class PolicyNetwork(nn.Module):
 
 def train_policy(obs: torch.Tensor, acs: torch.Tensor, 
                  nn_policy: PolicyNetwork, num_train_iters: int):
-    """TODO: train the policy using standard behavior cloning. Feel free to add other helper methods if you'd like or restructure the code as desired."""
     # RH: lr is the learning rate
     print("Training policy with behavior cloning...")
     optimizer = Adam(nn_policy.parameters(), lr=1e-1)
