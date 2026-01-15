@@ -13,7 +13,7 @@ import pickle
 import os
 
 
-device = torch.device('cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def collect_human_demos(num_demos: int):
@@ -82,39 +82,76 @@ def torchify_demos(sas_pairs) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 class PolicyNetwork(nn.Module):
     '''
-        Simple neural network with two layers that maps a 2-d state to a prediction
+        Neural network that maps a 2-d state to a prediction
         over which of the three discrete actions should be taken.
         The three outputs corresponding to the logits for a 3-way classification problem.
 
     '''
-    def __init__(self):
+    def __init__(self, hidden_size=256):
         super(PolicyNetwork, self).__init__()
-        # so 2-dim input, output to classify into 3 actions
-        """create the layers for the neural network. A two-layer network should be sufficient"""
-        self.fc1 = nn.Linear(2, 128)
+        # Deeper network with batch normalization and dropout for better performance
+        self.fc1 = nn.Linear(2, hidden_size)
+        self.bn1 = nn.BatchNorm1d(hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.bn2 = nn.BatchNorm1d(hidden_size)
+        self.fc3 = nn.Linear(hidden_size, 128)
+        self.bn3 = nn.BatchNorm1d(128)
+        self.fc4 = nn.Linear(128, 3)
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(128, 3)
+        self.dropout = nn.Dropout(0.2)
 
 
     def forward(self, x):
-        """this method performs a forward pass through the network, applying a non-linearity (ReLU is fine) on the hidden layers and should output logit values (since this is a discrete action task) for the 3-way classification problem"""
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
+        """Forward pass with batch normalization and dropout for regularization"""
+        x = self.relu(self.bn1(self.fc1(x)))
+        x = self.dropout(x)
+        x = self.relu(self.bn2(self.fc2(x)))
+        x = self.dropout(x)
+        x = self.relu(self.bn3(self.fc3(x)))
+        x = self.fc4(x)
         return x
    
 
 def train_policy(obs: torch.Tensor, acs: torch.Tensor, 
-                 nn_policy: PolicyNetwork, num_train_iters: int):
-    # RH: lr is the learning rate
+                 nn_policy: PolicyNetwork, num_train_iters: int, batch_size: int = 64):
     print("Training policy with behavior cloning...")
-    optimizer = Adam(nn_policy.parameters(), lr=1e-1)
-    for _ in range(num_train_iters):
-        logits = nn_policy(obs)
-        loss = F.cross_entropy(logits, acs)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    optimizer = Adam(nn_policy.parameters(), lr=3e-4, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_train_iters)
+    
+    nn_policy.train()
+    dataset_size = obs.shape[0]
+    
+    for epoch in range(num_train_iters):
+        # Shuffle data each epoch
+        indices = torch.randperm(dataset_size)
+        total_loss = 0
+        num_batches = 0
+        
+        # Mini-batch training
+        for i in range(0, dataset_size, batch_size):
+            batch_indices = indices[i:min(i + batch_size, dataset_size)]
+            batch_obs = obs[batch_indices]
+            batch_acs = acs[batch_indices]
+            
+            optimizer.zero_grad()
+            logits = nn_policy(batch_obs)
+            loss = F.cross_entropy(logits, batch_acs)
+            loss.backward()
+            
+            # Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_(nn_policy.parameters(), max_norm=1.0)
+            optimizer.step()
+            
+            total_loss += loss.item()
+            num_batches += 1
+        
+        scheduler.step()
+        
+        if (epoch + 1) % 20 == 0:
+            avg_loss = total_loss / num_batches
+            print(f"  Epoch {epoch + 1}/{num_train_iters}, Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
+    
+    nn_policy.eval()
     return
 
 
@@ -169,8 +206,8 @@ def load_model(filename='policy_model.pt'):
     Returns:
         PolicyNetwork: The loaded model.
     """
-    model = PolicyNetwork()
-    model.load_state_dict(torch.load(filename))
+    model = PolicyNetwork().to(device)
+    model.load_state_dict(torch.load(filename, map_location=device))
     model.eval()
     print(f"Model loaded from {filename}")
     return model
@@ -192,7 +229,7 @@ def evaluate_policy(pi, num_evals, human_render=True):
             #take the action that the network assigns the highest logit value to
             #Note that first we convert from numpy to tensor and then we get the value of the 
             #argmax using .item() and feed that into the environment
-            action = torch.argmax(pi(torch.from_numpy(obs).unsqueeze(0))).item()
+            action = torch.argmax(pi(torch.from_numpy(obs).unsqueeze(0).to(device))).item()
             # print(action)
             obs, rew, done, info = env.step(action) # type: ignore
             total_reward += rew
@@ -215,7 +252,7 @@ def rh_main(num_demos: int, num_bc_iters: int, num_evals: int):
         save_demos(demos, demo_file)
     
     obs, acs, _ = torchify_demos(demos)
-    pi = PolicyNetwork()
+    pi = PolicyNetwork().to(device)
     train_policy(obs, acs, pi, num_bc_iters)
     save_model(pi, 'mountain_car_policy.pt')
     evaluate_policy(pi, num_evals)
@@ -240,7 +277,7 @@ def main_argparse():
         save_demos(demos, demo_file)
     
     obs, acs, _ = torchify_demos(demos)
-    pi = PolicyNetwork()
+    pi = PolicyNetwork().to(device)
     train_policy(obs, acs, pi, args.num_bc_iters)
     save_model(pi, 'mountain_car_policy.pt')
     evaluate_policy(pi, args.num_evals)
