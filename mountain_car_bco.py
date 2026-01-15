@@ -42,9 +42,9 @@ def collect_random_interaction_data(num_iters: int) -> tuple[np.ndarray, np.ndar
     return np.array(state_next_state), np.array(actions)
 
 
-def collect_policy_interaction_data(policy: PolicyNetwork, num_iters: int) -> tuple[np.ndarray, np.ndarray]:
+def collect_policy_interaction_data(policy: PolicyNetwork, num_iters: int, epsilon: float = 0.1) -> tuple[np.ndarray, np.ndarray]:
     """
-    Collect state transitions using current policy network.
+    Collect state transitions using current policy network with epsilon-greedy exploration.
     Corresponds to line 6, 7 in BCO algorithm.
     For BCO(0), this is only done in the first iteration of the BCO loop.
     """
@@ -61,7 +61,11 @@ def collect_policy_interaction_data(policy: PolicyNetwork, num_iters: int) -> tu
             obs_tensor = torch.from_numpy(obs).float().unsqueeze(0).to(device)
             with torch.no_grad():
                 action_probs = policy(obs_tensor)
-                a = torch.argmax(action_probs).item()
+                # Epsilon-greedy exploration
+                if np.random.rand() < epsilon:
+                    a = env.action_space.sample()
+                else:
+                    a = torch.argmax(action_probs).item()
             
             next_obs, reward, done, info = env.step(a)  # type: ignore
             state_next_state.append(np.concatenate((obs, next_obs), axis=0))  # type: ignore
@@ -116,7 +120,7 @@ def train_inv_dyn(inv_dyn: InvDynamicsNetwork, s_s2_torch: torch.Tensor,
     Train the inverse dynamics model.
     
     NOTE: Mini-batch is used to improve training performance.
-    An annealing learning rate scheduler is used to improve convergence.
+    A learning rate scheduler is used to improve convergence.
     Gradient clipping is used to improve training stability.
     """
     optimizer = Adam(inv_dyn.parameters(), lr=learning_rate, weight_decay=1e-5)
@@ -164,6 +168,7 @@ def main_argparse():
     parser.add_argument('--num_evals', default=6, type=int, help="number of times to run policy after training for evaluation")
     args = parser.parse_args()
     return main(args.num_demos, args.num_bc_iters, args.num_evals)
+
 
 def main(num_demos: int, num_bc_iters: int, num_evals: int, 
          alpha: float = 0.0, num_bco_iters: int = 10):
@@ -241,13 +246,8 @@ def main(num_demos: int, num_bc_iters: int, num_evals: int,
     # Save trained models
     torch.save(inv_dyn.state_dict(), 'mountain_car_inv_dyn.pt')
     torch.save(pi.state_dict(), 'mountain_car_policy_bco.pt')
-    print("\n" + "=" * 60)
-    print("Models saved: mountain_car_inv_dyn.pt, mountain_car_policy_bco.pt")
-    print("=" * 60)
-    
-    # Evaluate learned policy
-    print("\n=== Final Evaluation ===")
     evaluate_policy(pi, num_evals)
+    return
 
 
 if __name__ == "__main__":
