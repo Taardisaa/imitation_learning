@@ -85,11 +85,9 @@ class PolicyNetwork(nn.Module):
         Neural network that maps a 2-d state to a prediction
         over which of the three discrete actions should be taken.
         The three outputs corresponding to the logits for a 3-way classification problem.
-
     '''
     def __init__(self, hidden_size=256):
         super(PolicyNetwork, self).__init__()
-        # Deeper network with batch normalization and dropout for better performance
         self.fc1 = nn.Linear(2, hidden_size)
         self.bn1 = nn.BatchNorm1d(hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
@@ -114,20 +112,37 @@ class PolicyNetwork(nn.Module):
 
 def train_policy(obs: torch.Tensor, acs: torch.Tensor, 
                  nn_policy: PolicyNetwork, num_train_iters: int, batch_size: int = 64):
+    """
+    Train the policy network using behavior cloning.
+    
+    NOTE: This function modifies the nn_policy in place.
+    
+    mini batches are introduced to improve training performance.
+    
+    annealing learning rate scheduler is to improve convergence.
+    
+    gradient clipping is used to improve training stability.
+    
+    Args:
+        obs (torch.Tensor): Tensor of observations (states).
+        acs (torch.Tensor): Tensor of actions taken.
+        nn_policy (PolicyNetwork): The policy network to be trained.
+        num_train_iters (int): Number of training iterations (epochs).
+        batch_size (int): Size of each training batch. Defaults to 64.
+    """
     print("Training policy with behavior cloning...")
     optimizer = Adam(nn_policy.parameters(), lr=3e-4, weight_decay=1e-4)
+    # NOTE: a refinement: we use cosine annealing LR scheduler to make the learning rate decay over time.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_train_iters)
     
     nn_policy.train()
     dataset_size = obs.shape[0]
     
     for epoch in range(num_train_iters):
-        # Shuffle data each epoch
         indices = torch.randperm(dataset_size)
         total_loss = 0
         num_batches = 0
         
-        # Mini-batch training
         for i in range(0, dataset_size, batch_size):
             batch_indices = indices[i:min(i + batch_size, dataset_size)]
             batch_obs = obs[batch_indices]
@@ -138,7 +153,7 @@ def train_policy(obs: torch.Tensor, acs: torch.Tensor,
             loss = F.cross_entropy(logits, batch_acs)
             loss.backward()
             
-            # Gradient clipping for stability
+            # Gradient clipping for training stability
             torch.nn.utils.clip_grad_norm_(nn_policy.parameters(), max_norm=1.0)
             optimizer.step()
             
