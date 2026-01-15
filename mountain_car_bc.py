@@ -11,31 +11,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pickle
 import os
-
+import tqdm
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def collect_human_demos(num_demos: int):
-    """
-    Collect human demonstration data for the Mountain Car environment.
-    
-    Creates a Mountain Car environment and collects human-controlled demonstrations
-    using keyboard input. The user controls the car with LEFT and RIGHT arrow keys,
-    with no-op as the default action.
-    
-    Args:
-        num_demos (int): The number of demonstration episodes to collect.
-    
-    Returns:
-        list: A list of collected demonstrations, where each demonstration contains
-              the sequence of states, actions, and rewards from a single episode.
-    
-    Note:
-        - LEFT arrow key maps to action 0 (push left)
-        - RIGHT arrow key maps to action 2 (push right)
-        - Action 1 (no-op) is used as the default action when no key is pressed
-    """
     mapping = {(pygame.K_LEFT,): 0, (pygame.K_RIGHT,): 2}
     env = gym.make("MountainCar-v0",render_mode='single_rgb_array') 
     demos = collect_demos(env, keys_to_action=mapping,  # type: ignore
@@ -44,23 +25,6 @@ def collect_human_demos(num_demos: int):
 
 
 def torchify_demos(sas_pairs) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Convert demonstration state-action-state pairs to PyTorch tensors.
-
-    This function takes a list of (state, action, next_state) tuples and converts
-    them into PyTorch tensors on the specified device. States and next states are
-    converted to float tensors, while actions are converted to long tensors.
-
-    Args:
-        sas_pairs (list): A list of tuples containing (state, action, next_state) pairs,
-                          where states are numpy arrays and actions are integers.
-
-    Returns:
-        tuple: A tuple containing three PyTorch tensors:
-            - obs_torch (torch.Tensor): Current states as float tensor on device.
-            - acs_torch (torch.Tensor): Actions as long tensor on device.
-            - obs2_torch (torch.Tensor): Next states as float tensor on device.
-    """
     states = []
     actions = []
     next_states = []
@@ -76,7 +40,6 @@ def torchify_demos(sas_pairs) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     obs_torch: torch.Tensor = torch.from_numpy(np.array(states)).float().to(device)
     obs2_torch: torch.Tensor = torch.from_numpy(np.array(next_states)).float().to(device)
     acs_torch: torch.Tensor = torch.from_numpy(np.array(actions)).long().to(device)
-
     return obs_torch, acs_torch, obs2_torch
 
 
@@ -85,7 +48,6 @@ class PolicyNetwork(nn.Module):
         Neural network that maps a 2-d state to a prediction
         over which of the three discrete actions should be taken.
         The three outputs corresponding to the logits for a 3-way classification problem.
-
     '''
     def __init__(self, hidden_size=256):
         super(PolicyNetwork, self).__init__()
@@ -110,46 +72,39 @@ class PolicyNetwork(nn.Module):
         x = self.relu(self.bn3(self.fc3(x)))
         x = self.fc4(x)
         return x
-   
+    
 
 def train_policy(obs: torch.Tensor, acs: torch.Tensor, 
                  nn_policy: PolicyNetwork, num_train_iters: int, batch_size: int = 64):
-    print("Training policy with behavior cloning...")
-    optimizer = Adam(nn_policy.parameters(), lr=3e-4, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_train_iters)
+    optim = Adam(nn_policy.parameters(), lr=3e-4, weight_decay=1e-4)
     
     nn_policy.train()
     dataset_size = obs.shape[0]
     
-    for epoch in range(num_train_iters):
-        # Shuffle data each epoch
-        indices = torch.randperm(dataset_size)
-        total_loss = 0
-        num_batches = 0
-        
-        # Mini-batch training
-        for i in range(0, dataset_size, batch_size):
-            batch_indices = indices[i:min(i + batch_size, dataset_size)]
-            batch_obs = obs[batch_indices]
-            batch_acs = acs[batch_indices]
+    # for epoch in tqdm.tqdm(range(num_train_iters), desc="Behavior Cloning Training"):
+    with tqdm.tqdm(total=num_train_iters, desc="Behavior Cloning Training") as pbar:
+        for epoch in range(num_train_iters):
+            pbar.update(1)
+            indices = torch.randperm(dataset_size)
+            total_loss = 0
+            num_batches = 0
             
-            optimizer.zero_grad()
-            logits = nn_policy(batch_obs)
-            loss = F.cross_entropy(logits, batch_acs)
-            loss.backward()
-            
-            # Gradient clipping for stability
-            torch.nn.utils.clip_grad_norm_(nn_policy.parameters(), max_norm=1.0)
-            optimizer.step()
-            
-            total_loss += loss.item()
-            num_batches += 1
+            for i in range(0, dataset_size, batch_size):
+                batch_indices = indices[i:min(i + batch_size, dataset_size)]
+                batch_obs = obs[batch_indices]
+                batch_acs = acs[batch_indices]
+                
+                optim.zero_grad()
+                logits = nn_policy(batch_obs)
+                loss = F.cross_entropy(logits, batch_acs)
+                loss.backward()
+                optim.step()
+                
+                total_loss += loss.item()
+                num_batches += 1
+            pbar.set_postfix({'Avg Loss': f"{total_loss / num_batches:.4f}"})
         
-        scheduler.step()
-        
-        if (epoch + 1) % 20 == 0:
-            avg_loss = total_loss / num_batches
-            print(f"  Epoch {epoch + 1}/{num_train_iters}, Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
+        # print(f"Avg Loss: {total_loss / num_batches:.4f}")
     
     nn_policy.eval()
     return
@@ -258,6 +213,7 @@ def rh_main(num_demos: int, num_bc_iters: int, num_evals: int):
     evaluate_policy(pi, num_evals)
     return
 
+
 # if __name__ == "__main__":
 def main_argparse():
     parser = argparse.ArgumentParser(description=None)
@@ -282,6 +238,7 @@ def main_argparse():
     save_model(pi, 'mountain_car_policy.pt')
     evaluate_policy(pi, args.num_evals)
     return
+
 
 if __name__ == "__main__":
     rh_main(num_demos=5, num_bc_iters=100, num_evals=6)
